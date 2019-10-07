@@ -1,0 +1,12 @@
+# Ignore data directories
+Data/
+reads/
+QC/
+salmon/
+deseq/
+.snakemake/
+report.html
+logs/*
+.DS_Store
+._*
+envs/snake_no_conda.yaml

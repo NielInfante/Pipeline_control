@@ -1,0 +1,285 @@
+---
+title: "RNA seq Report"
+author: "Niel Infante"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output: slidy_presentation
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning=F)
+
+
+# Error logging
+log <- file(snakemake@log[[1]], open="wt")
+sink(log)
+sink(log, type="message")
+
+# Load needed packages
+library(tidyverse)
+library(DESeq2)
+library("RColorBrewer")
+library(ggrepel)
+library(gplots)
+library(pheatmap)
+library(knitr)
+
+# Read dds
+exp <- snakemake@params$exp
+dds <- readRDS(paste0("deseq/", exp, "/dds.rds"))
+
+vsd <- vst(dds, blind=F)
+
+# For testing only
+#vsd <- varianceStabilizingTransformation(dds, blind=F)
+
+
+# Select genes which are ost informative,
+# ie those that have the biggest difference in expression
+asvd <- assay(vsd)
+info <- rowMax(asvd) - rowMin(asvd)
+minInfo <- info[order(info, decreasing = T)][500]
+vsd <- vsd[info > minInfo,]
+
+
+# Read Metadata and source config
+meta_file_name <- snakemake@config$metadata_file
+meta <- read_tsv(meta_file_name)
+
+snakemake@source(paste0('../deseq/', exp, '/config.R'))
+
+# Read results
+res <- read_tsv(paste0('deseq/', exp, '/results.txt'))
+sig <- read_tsv(paste0('deseq/', exp, '/significant.txt'))
+
+# Read CV
+cv <- read_tsv(paste0('deseq/', exp, '/basemean_cutoff.txt'))
+cut_value <- cv$CV[1]
+```
+
+## Results
+
+This the the format of the results table. The full list is available in the file results.txt
+```{r results}
+
+kable(res[1:5,])
+
+```
+
+<smaller>
+<table>
+	<tr>
+		<th>Column</th>
+		<th>Meaning</th>
+	</tr>
+	<tr>
+		<td>GeneID</td>
+		<td>Ensembl Gene ID</td>
+	</tr>
+	<tr>
+		<td>GeneName</td>
+		<td>The name of the gene</td>
+	</tr>
+	<tr>
+		<td>baseMean</td>
+		<td>Average expression of the gene across all samples</td>
+	</tr>
+	<tr>
+		<td>log2FoldChange</td>
+		<td>log2 of the fold change of the gene</td>
+	</tr>
+	<tr>
+		<td>lfcSE</td>
+		<td>Standard Error of the fold change</td>
+	</tr>
+	<tr>
+		<td>stat</td>
+		<td>The test statistic of the gene, used to calculate p value. Useful in some downstream analyses</td>
+	</tr>
+	<tr>
+		<td>pvalue</td>
+		<td>Unadjusted p value</td>
+	</tr>
+	<tr>
+		<td>padj</td>
+		<td>p value adjusted using Benjaminni-Hockberg correction</td>
+	</tr>
+	<tr>
+		<td>Sample Column</td>
+		<td>Normalized counts for each sample</td>
+	</tr>
+	<tr>
+		<td>Biotype</td>
+		<td>The Biotype of the gene. Note that currently only one biotype is picked for each gene. Some genes may have more than one biotype</td>
+	</tr>
+</table>
+</smaller>
+
+
+
+
+## Fold Change
+
+```{r sanity}
+
+title=paste(res[1,]$GeneName, "\nFold Change:",res[1,]$log2FoldChange)
+plotCounts(dds, gene=res[1,]$GeneID, intgroup = PCA_Group, main=res[1,]$GeneName, 
+					 sub=paste('FC:', format(res[1,]$log2FoldChange, digits=2)), pch=19)
+
+
+```
+
+Fold change is reported as log2 (Fold Change). This graph gives you an idea of what a positive versus negative fold change means.
+
+## Expression Cutoff
+
+```{r expr_cut}
+ggplot(res, aes(x=log2(baseMean))) + geom_density() + 
+	geom_vline(xintercept=cut_value, color='red') +
+	geom_text(aes(x=cut_value, y=.6, label='   Expression Cutoff', hjust='left'), color='red')
+
+
+```
+
+Genes are filtered if the average expression across all samples is less than the cut off value, in this case `r 2^cut_value`.
+
+## Significant Genes
+A total of `r dim(sig)[1]` genes were counted as significant in this test. Genes are counted as significant if their base mean is above `r 2^cut_value` and the adjusted p value is below 0.05. No fold change criterion was used for this list.
+
+The top significant genes are:
+
+```{r significant}
+
+num_to_show <- min(10, dim(sig)[1])
+
+kable(sig[1:num_to_show,])
+
+```
+
+
+
+
+## MA Plot
+
+```{r maplot}
+plotMA(dds)
+```
+
+<!--  Remove this section 
+## Sample Distance
+
+```{r sample_heat}
+
+select <- order(rowMeans(counts(dds,normalized=TRUE)),decreasing=TRUE)[1:100]
+hmcol <- colorRampPalette(brewer.pal(9, "GnBu"))(100)
+
+distsRL <- dist(t(assay(vsd)))
+mat <- as.matrix(distsRL)
+rownames(mat) <- colnames(mat) <- with(colData(dds), paste(Graph_Display))
+
+heatmap.2(mat, trace="none", col = rev(hmcol), margin=c(8, 8), density.info = 'none')
+
+```
+
+This is a heatmap of sample distances. Dark indicates the samples are closer together, based on the expression of the 100 most expressed genes.
+
+-->
+
+## Cluster
+
+```{r cluster}
+plot(hclust(dist(t(assay(vsd)))), label=with(colData(dds), paste(Graph_Display)), main='Dendrogram', xlab='', sub='')
+
+```
+
+
+## PCA
+```{r pca}
+
+
+print(plotPCA(vsd, intgroup=c(PCA_Group)))
+```
+
+A Principle Conmponent plot of the data. Each point is a sample.
+
+
+## PCA with Names
+```{r pca_names}
+
+p <- plotPCA(vsd, intgroup=c(PCA_Group))
+p <- p + geom_text_repel(aes(x=PC1, y=PC2, 
+				label=with(colData(dds), paste(Graph_Display))), 
+				point.padding = unit(2,"points"))
+print(p)
+
+```
+
+The same PCA plot, with added names
+
+
+
+##  Volcano
+
+```{r volcano}
+
+par(pch = 16)
+with(res, plot(log2FoldChange, -log10(pvalue), main = "Volcano plot"))
+with(subset(res, padj < 0.05), points(log2FoldChange, -log10(pvalue), col = "red"))
+with(subset(res, abs(log2FoldChange) > 2), points(log2FoldChange, -log10(pvalue),  col = "orange"))
+
+with(subset(res, padj < 0.05 & abs(log2FoldChange) > 2), points(log2FoldChange,  -log10(pvalue), col = "green"))
+
+# Add legend
+legend("topleft", legend = c("FDR<0.05", "|LFC|>2", "both"), pch = 16, col = c("red", "orange", "green"))
+
+```
+
+
+## Expression Heatmap
+
+```{r pheatmap, message=F, warning=F}
+
+rld <- rlog(dds, blind = F)
+
+# Get 15 up, 15 down 
+
+up <- head(order(res$log2FoldChange),15)
+up <- res[up,'GeneID']
+
+
+dn <- head(order(res$log2FoldChange, decreasing = T),15)
+dn <- res[dn,'GeneID']
+
+#get <- c(up,dn)
+get <- c(unlist(up),unlist(dn))
+
+
+rld15 <- rld[get]
+#rld15 <- rld[rld@rowRanges@partitioning@NAMES %in% get, ]
+
+rn <- data.frame(GeneID=rownames(rld15))
+rn <- left_join(rn, res)
+
+rownames(rld15) <- rn$GeneName
+
+mat <- assay(rld15)
+mat <- mat - rowMeans(mat)     # Get difference from mean for each gene
+df <- as.data.frame(colData(rld15)[,PCA_Group])
+names(df) <- PCA_Group
+
+# Need the same names in both the df and the matrix
+rownames(df) <- colData(rld15)[,c('Graph_Display')]
+colnames(mat) <- colData(rld15)[,c('Graph_Display')]
+
+
+pheatmap(mat, cutree_rows = 2, cutree_cols = 2, annotation_col = df, angle_col = "45")
+
+```
+
+Heatmap shows the 15 most upregulated, and 15 most downregulated genes. Color indicates how much the expression of the gene inthe samples is different from the mean expression of that gene.
+
+
+
+
+
+
+
